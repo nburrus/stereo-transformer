@@ -5,7 +5,7 @@
 import math
 
 import torch
-from torch import nn
+from torch import Tensor, nn
 
 from utilities.misc import NestedTensor
 
@@ -27,26 +27,26 @@ class PositionEncodingSine1DRelative(nn.Module):
         self.scale = scale
 
     @torch.no_grad()
-    def forward(self, inputs: NestedTensor):
+    def forward(self, left: Tensor, right: Tensor, sampled_cols: Tensor, sampled_rows: Tensor):
         """
         :param inputs: NestedTensor
         :return: pos encoding [N,C,H,2W-1]
         """
-        x = inputs.left
+        x = left
 
         # update h and w if downsampling
         bs, _, h, w = x.size()
-        if inputs.sampled_cols is not None:
-            bs, w = inputs.sampled_cols.size()
-        if inputs.sampled_rows is not None:
-            _, h = inputs.sampled_rows.size()
+        if sampled_cols is not None:
+            bs, w = sampled_cols.size()
+        if sampled_rows is not None:
+            _, h = sampled_rows.size()
 
         # populate all possible relative distances
         x_embed = torch.linspace(w - 1, -w + 1, 2 * w - 1, dtype=torch.float32, device=x.device)
 
         # scale distance if there is down sample
-        if inputs.sampled_cols is not None:
-            scale = x.size(-1) / float(inputs.sampled_cols.size(-1))
+        if sampled_cols is not None:
+            scale = x.size(-1) / float(sampled_cols.size(-1))
             x_embed = x_embed * scale
 
         if self.normalize:

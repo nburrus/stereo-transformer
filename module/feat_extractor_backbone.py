@@ -6,7 +6,7 @@ import math
 
 import torch
 import torch.nn.functional as F
-from torch import nn
+from torch import Tensor, nn
 from torchvision.models.resnet import BasicBlock
 
 from utilities.misc import NestedTensor
@@ -67,7 +67,7 @@ class SppBackbone(nn.Module):
             layers.append(block(self.inplanes, planes))
         return nn.Sequential(*layers)
 
-    def forward(self, x: NestedTensor):
+    def forward(self, left: Tensor, right: Tensor):
         """
         :param x: NestedTensor
         :return: list containing feature descriptors at different spatial resolution
@@ -76,9 +76,9 @@ class SppBackbone(nn.Module):
                 2: [2N, C1, H//8, W//8]
                 3: [2N, C2, H//16, W//16]
         """
-        _, _, h, w = x.left.shape
+        _, _, h, w = left.shape
 
-        src_stereo = torch.cat([x.left, x.right], dim=0)  # 2NxCxHxW
+        src_stereo = torch.cat([left, right], dim=0)  # 2NxCxHxW
 
         # in conv
         output = self.in_conv(src_stereo)  # 1/2

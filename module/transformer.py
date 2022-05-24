@@ -57,7 +57,8 @@ class Transformer(nn.Module):
 
                 return custom_self_attn
 
-            feat = checkpoint(create_custom_self_attn(self_attn), feat, pos_enc, pos_indexes)
+            # feat = checkpoint(create_custom_self_attn(self_attn), feat, pos_enc, pos_indexes)
+            feat = self_attn(feat, pos_enc, pos_indexes)
 
             # add a flag for last layer of cross attention
             if idx == self.num_attn_layers - 1:
@@ -75,8 +76,9 @@ class Transformer(nn.Module):
 
                     return custom_cross_attn
 
-            feat, attn_weight = checkpoint(create_custom_cross_attn(cross_attn), feat[:, :hn], feat[:, hn:], pos_enc,
-                                           pos_indexes)
+            # feat, attn_weight = checkpoint(create_custom_cross_attn(cross_attn), feat[:, :hn], feat[:, hn:], pos_enc,
+            #                                pos_indexes)
+            feat, attn_weight = cross_attn(feat[:, :hn], feat[:, hn:], pos_enc, pos_indexes)
 
         layer_idx = 0
         return attn_weight

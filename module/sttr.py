@@ -2,6 +2,7 @@
 #
 #  Copyright (c) 2020. Johns Hopkins University - All rights reserved.
 
+from torch import Tensor
 import torch.nn as nn
 
 from module.feat_extractor_backbone import build_backbone
@@ -53,6 +54,7 @@ class STTR(nn.Module):
         """
         disable Batchnorm tracking stats to reduce dependency on dataset (this acts as InstanceNorm with affine when batch size is 1)
         """
+        # Disable this for ONNX export, otherwise it thinks that BN is in training mode.
         for m in self.modules():
             if isinstance(m, nn.BatchNorm2d):
                 m.track_running_stats = False
@@ -68,7 +70,12 @@ class STTR(nn.Module):
             if isinstance(m, nn.BatchNorm2d):
                 m.inplace = True
 
-    def forward(self, x: NestedTensor):
+    def forward(self, 
+                left: Tensor, right: Tensor,
+                sampled_cols: Tensor, sampled_rows: Tensor,
+                disp: Tensor = None,
+                occ_mask: Tensor = None,
+                occ_mask_right: Tensor = None):
         """
         :param x: input data
         :return:
@@ -77,29 +84,29 @@ class STTR(nn.Module):
             - "occ_pred" [N,H,W]: predicted occlusion mask
             - "disp_pred_low_res" [N,H//s,W//s]: predicted low res (raw) disparity
         """
-        bs, _, h, w = x.left.size()
+        bs, _, h, w = left.size()
 
         # extract features
-        feat = self.backbone(x)  # concatenate left and right along the dim=0
+        feat = self.backbone(left, right)  # concatenate left and right along the dim=0
         tokens = self.tokenizer(feat)  # 2NxCxHxW
-        pos_enc = self.pos_encoder(x)  # NxCxHx2W-1
+        pos_enc = self.pos_encoder(left, right, sampled_cols, sampled_rows)  # NxCxHx2W-1
 
         # separate left and right
         feat_left = tokens[:bs]
         feat_right = tokens[bs:]  # NxCxHxW
 
         # downsample
-        if x.sampled_cols is not None:
-            feat_left = batched_index_select(feat_left, 3, x.sampled_cols)
-            feat_right = batched_index_select(feat_right, 3, x.sampled_cols)
-        if x.sampled_rows is not None:
-            feat_left = batched_index_select(feat_left, 2, x.sampled_rows)
-            feat_right = batched_index_select(feat_right, 2, x.sampled_rows)
+        if sampled_cols is not None:
+            feat_left = batched_index_select(feat_left, 3, sampled_cols)
+            feat_right = batched_index_select(feat_right, 3, sampled_cols)
+        if sampled_rows is not None:
+            feat_left = batched_index_select(feat_left, 2, sampled_rows)
+            feat_right = batched_index_select(feat_right, 2, sampled_rows)
 
         # transformer
         attn_weight = self.transformer(feat_left, feat_right, pos_enc)
 
         # regress disparity and occlusion
-        output = self.regression_head(attn_weight, x)
+        output = self.regression_head(attn_weight, left, right, sampled_cols, sampled_rows, disp, occ_mask, occ_mask_right)
 
         return output

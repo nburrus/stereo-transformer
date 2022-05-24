@@ -102,7 +102,7 @@ class RegressionHead(nn.Module):
 
         return gt_response, target
 
-    def _upsample(self, x: NestedTensor, disp_pred: Tensor, occ_pred: Tensor, scale: int):
+    def _upsample(self, left: Tensor, disp_pred: Tensor, occ_pred: Tensor, scale: int):
         """
         Upsample the raw prediction to full resolution
 
@@ -112,7 +112,7 @@ class RegressionHead(nn.Module):
         :param scale: high-res to low-res disparity scale
         :return: high res disp and occ prediction
         """
-        _, _, h, w = x.left.size()
+        _, _, h, w = left.size()
 
         # scale disparity
         disp_pred_attn = disp_pred * scale
@@ -131,7 +131,7 @@ class RegressionHead(nn.Module):
             # normalize occlusion mask
             occ_pred_normalized = (occ_pred - 0.5) / 0.5
 
-            disp_pred_normalized, occ_pred = self.cal(disp_pred_normalized, occ_pred_normalized, x.left)  # N x H x W
+            disp_pred_normalized, occ_pred = self.cal(disp_pred_normalized, occ_pred_normalized, left)  # N x H x W
 
             disp_pred_final = disp_pred_normalized * std_disp_pred + mean_disp_pred
         else:
@@ -216,7 +216,15 @@ class RegressionHead(nn.Module):
         occ_pred = 1.0 - matched_attn
         return occ_pred.squeeze(-1)
 
-    def forward(self, attn_weight: Tensor, x: NestedTensor):
+    def forward(self, 
+                attn_weight: Tensor,
+                left: Tensor,
+                right: Tensor,
+                sampled_cols: Tensor,
+                sampled_rows: Tensor,
+                x_disp: Tensor = None,
+                x_occ_mask: Tensor = None,
+                x_occ_mask_right: Tensor = None):
         """
         Regression head follows steps of
             - compute scale for disparity (if there is downsampling)
@@ -229,12 +237,17 @@ class RegressionHead(nn.Module):
         :param x: input data
         :return: dictionary of predicted values
         """
-        bs, _, h, w = x.left.size()
-        output = {}
+        bs, _, h, w = left.size()
+
+        gt_response = None
+        gt_response_occ_left = None
+        gt_response_occ_right = None
+        disp_pred: Tensor = None
+        occ_pred: Tensor = None
 
         # compute scale
-        if x.sampled_cols is not None:
-            scale = x.left.size(-1) / float(x.sampled_cols.size(-1))
+        if sampled_cols is not None:
+            scale = left.size(-1) / float(sampled_cols.size(-1))
         else:
             scale = 1.0
 
@@ -247,31 +260,31 @@ class RegressionHead(nn.Module):
             attn_ot = self._softmax(attn_weight)
 
         # compute relative response (RR) at ground truth location
-        if x.disp is not None:
+        if x_disp is not None:
             # find ground truth response (gt_response) and location (target)
-            output['gt_response'], target = self._compute_gt_location(scale, x.sampled_cols, x.sampled_rows,
-                                                                      attn_ot[..., :-1, :-1], x.disp)
+            gt_response, target = self._compute_gt_location(scale, sampled_cols, sampled_rows,
+                                                                      attn_ot[..., :-1, :-1], x_disp)
         else:
-            output['gt_response'] = None
+            gt_response = None
 
         # compute relative response (RR) at occluded location
-        if x.occ_mask is not None:
+        if x_occ_mask is not None:
             # handle occlusion
-            occ_mask = x.occ_mask
-            occ_mask_right = x.occ_mask_right
-            if x.sampled_cols is not None:
-                occ_mask = batched_index_select(occ_mask, 2, x.sampled_cols)
-                occ_mask_right = batched_index_select(occ_mask_right, 2, x.sampled_cols)
-            if x.sampled_rows is not None:
-                occ_mask = batched_index_select(occ_mask, 1, x.sampled_rows)
-                occ_mask_right = batched_index_select(occ_mask_right, 1, x.sampled_rows)
+            occ_mask = x_occ_mask
+            occ_mask_right = x_occ_mask_right
+            if sampled_cols is not None:
+                occ_mask = batched_index_select(occ_mask, 2, sampled_cols)
+                occ_mask_right = batched_index_select(occ_mask_right, 2, sampled_cols)
+            if sampled_rows is not None:
+                occ_mask = batched_index_select(occ_mask, 1, sampled_rows)
+                occ_mask_right = batched_index_select(occ_mask_right, 1, sampled_rows)
 
-            output['gt_response_occ_left'] = attn_ot[..., :-1, -1][occ_mask]
-            output['gt_response_occ_right'] = attn_ot[..., -1, :-1][occ_mask_right]
+            gt_response_occ_left = attn_ot[..., :-1, -1][occ_mask]
+            gt_response_occ_right = attn_ot[..., -1, :-1][occ_mask_right]
         else:
-            output['gt_response_occ_left'] = None
-            output['gt_response_occ_right'] = None
-            occ_mask = x.occ_mask
+            gt_response_occ_left = None
+            gt_response_occ_right = None
+            occ_mask = x_occ_mask
 
         # regress low res disparity
         pos_shift = self._compute_unscaled_pos_shift(attn_weight.shape[2], attn_weight.device)  # NxHxW_leftxW_right
@@ -285,15 +298,15 @@ class RegressionHead(nn.Module):
         #     torch.save(target, f)
 
         # upsample and context adjust
-        if x.sampled_cols is not None:
-            output['disp_pred'], output['disp_pred_low_res'], output['occ_pred'] = self._upsample(x, disp_pred_low_res,
+        if sampled_cols is not None:
+            disp_pred, disp_pred_low_res, occ_pred = self._upsample(left, disp_pred_low_res,
                                                                                                   occ_pred_low_res,
                                                                                                   scale)
         else:
-            output['disp_pred'] = disp_pred_low_res
-            output['occ_pred'] = occ_pred_low_res
+            disp_pred = disp_pred_low_res
+            occ_pred = occ_pred_low_res
 
-        return output
+        return disp_pred, occ_pred
 
 
 def build_regression_head(args):
